@@ -8,6 +8,7 @@ import string
 from IPython.display import display
 import pandas as pd
 from ipywidgets import Tab, Output, HTML
+import time
 
 logging.basicConfig(format='[%(asctime)s] p%(process)s {%(filename)s:%(lineno)d} %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -176,10 +177,92 @@ def create_agent_action_group(bedrock_agent, actionGroupName, description,
         raise
     except Exception as e:
         print(f"Error: {e}")
-        raise    
+        raise
 
 
-def create_agent(bedrock_agent, agentName, agent_service_role_arn, 
+def delete_agent_by_name(bedrock_agent, agentName):
+    agents_list = bedrock_agent.list_agents()
+    existing_agent = next((agent for agent in agents_list['agentSummaries']
+                           if agent['agentName'] == agentName), None)
+    if not existing_agent:
+        print(f'Delete Skipped. Could not find agent by name {agentName}')
+        return None
+    agent_id = existing_agent['agentId']
+    response = bedrock_agent.delete_agent(agentId=agent_id,
+                                        skipResourceInUseCheck=True)
+    if response['agentStatus'] == 'DELETING':
+        max_iterations = 5
+        delay = 15
+        for _ in range(max_iterations):
+            try:
+                response = bedrock_agent.get_agent(agentId=agent_id)
+                time.sleep(delay) # nosemgrep
+            except bedrock_agent.exceptions.ResourceNotFoundException:
+                print(f'Agent {agentName} Deleted')
+                return None
+
+
+def update_knowledge_base(bedrock_agent, kb_name, kb_role_arn=None, kb_description=None):
+    kb_list = bedrock_agent.list_knowledge_bases()
+    existing_kb = next((kb for kb in kb_list['knowledgeBaseSummaries']
+                        if kb['name'] == kb_name), None)
+    if not existing_kb:
+        print(f'Update Skippped. Could not find Knowledge Base by name {kb_name}')
+    kb_id = existing_kb['knowledgeBaseId']
+    kb = bedrock_agent.get_knowledge_base(knowledgeBaseId=kb_id)
+    response = bedrock_agent.update_knowledge_base(
+        description=kb_description if kb_description else kb['knowledgeBase']['description'],
+        knowledgeBaseConfiguration=kb['knowledgeBase']['knowledgeBaseConfiguration'],
+        knowledgeBaseId=kb_id,
+        name=kb_name if kb_name else kb['knowledgeBase']['name'],
+        roleArn=kb_role_arn if kb_role_arn else kb['knowledgeBase']['roleArn'],
+        storageConfiguration=kb['knowledgeBase']['storageConfiguration']
+    )
+    if response['knowledgeBase']['status'] == 'UPDATING':
+        status_response = wait_for_completion(
+            bedrock_agent,
+            bedrock_agent.get_knowledge_base,
+            {'knowledgeBaseId': kb_id},
+            'knowledgeBase.status',
+            ['ACTIVE'],
+            ['FAILED'],
+            max_iterations=10,
+            delay=10,
+        )
+        print(f"Updated Knowledge Base with name {kb_name}. Current status {status_response['knowledgeBase']['status']}")
+        return kb_id, status_response['knowledgeBase']['status']
+    else:
+        print("Update Skipped")
+        return response
+
+def delete_knowledge_base_by_name(bedrock_agent, kb_name):
+    kb_list = bedrock_agent.list_knowledge_bases()
+    existing_kb = next((kb for kb in kb_list['knowledgeBaseSummaries']
+                        if kb['name'] == kb_name), None)
+    if not existing_kb:
+        print(f'Delete Skipped. Could not find Knowledge Base by name {kb_name}')
+        return None
+    kb_id = existing_kb['knowledgeBaseId']
+    response = bedrock_agent.delete_knowledge_base(knowledgeBaseId=kb_id)
+    if response['status'] == 'DELETING':
+        max_iterations = 5
+        delay = 15
+        for _ in range(max_iterations):
+            try:
+                response = bedrock_agent.get_knowledge_base(
+                    knowledgeBaseId=kb_id)
+                if response['knowledgeBase']['status'] == 'DELETE_UNSUCCESSFUL':
+                    failure_message = f"Delete Failed, {response['knowledgeBase']['failureReasons']}"
+                    print(failure_message)
+                    return failure_message
+                time.sleep(delay)   # nosemgrep
+            except bedrock_agent.exceptions.ResourceNotFoundException:
+                success_message = f'KB {kb_name} Deleted'
+                print(success_message)
+                return (success_message)
+
+
+def create_agent(bedrock_agent, agentName, agent_service_role_arn,
                  description, foundation_model_id, agent_instruction, orchestrationType):
 
     try:
@@ -234,9 +317,8 @@ def create_agent(bedrock_agent, agentName, agent_service_role_arn,
         raise
     except Exception as e:
         print(f"Error: {e}")
-        raise    
+        raise
 
-        
 def create_knowledge_base(bedrock_agent, kb_name, 
                           kb_description, 
                           kb_role_arn,
@@ -376,9 +458,9 @@ def ingest_and_wait(bedrock_agent, data_source_id , knowledge_base_id, documents
         documents=[
             get_document_configuration(document['document_id'], document['plan_name'], document['document_uri'])
             for document in documents
-        ]
+        ] 
     )
-    
+        
     def wait_for_single_document(document):
         return wait_for_completion(
             client=bedrock_agent,
@@ -396,7 +478,7 @@ def ingest_and_wait(bedrock_agent, data_source_id , knowledge_base_id, documents
             error_states=['FAILED'],
             status_path_in_response='documentDetails[0].status',
             max_iterations=5,
-            delay=5, verbose=False
+            delay=10, verbose=False
         )
 
     # Use ThreadPoolExecutor to run wait_for_completion in parallel
